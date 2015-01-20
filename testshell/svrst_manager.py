@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+# coding: utf-8
 import svbk_manager
 import psbk_manager
 import svbk_conflict
@@ -12,6 +14,10 @@ import sqlite3
 import sys
 import pexpect
 import re
+import pxssh
+from retry import retry
+import fuel_utls
+import ipmi_client
 
 #disk size
 LIMIT_DISK_SIZE_G=1
@@ -36,7 +42,9 @@ START_INDEX	=1
 R_END_STATUS="restore_ok"
 R_NG_STATUS="restore_ng"
 
-FILEDIR="/etc/backuprestore"
+#TODO
+#FILEDIR="/etc/backuprestore"
+FILEDIR="/home/openstack/flask-env"
 BASE_DIR_NAME="/backup"
 MASTER_ENV='BASE'
 RESET_ENV='INITIALIZE'
@@ -72,6 +80,14 @@ SEND_EXIT='exit'
 SEND_YES='yes'
 
 DEFAULT_OS='Ubuntu_12.04LTS'
+# Fuel restore image name
+FUEL_IMG = 'fuel511-img'
+
+# Server Type
+OPENORION_AGENT = '001'
+FUEL_SERVER = '002'
+FUEL_AGENT = '003'
+NON_ASSIGNMENT = '999'
 
 #---------------------------------------------------------
 class svrst_manager():
@@ -197,31 +213,33 @@ class svrst_manager():
 		c.expect(pexpect.EOF)
 		c.close()
 
-	def set_system_param(self,clster_name,node_id,br_mode):
+	def set_system_param(self, clster_name, node_id, br_mode):
 
 		conf = ConfigParser.SafeConfigParser()
 
-		set_file_path='%s/%s' % (FILEDIR, SET_CONFIG_FILE)
+		set_file_path = '%s/%s' % (FILEDIR, SET_CONFIG_FILE)
 
-		ret=conf.read(set_file_path)
+		ret = conf.read(set_file_path)
 
-		if len(ret)==0 :
+		if len(ret) == 0:
 			self.svbkm.br_log(node_id, clster_name, br_mode, '####set_system_param ng file is nothing ')
 			return NG
 
-		self.svbkm.br_log(node_id, clster_name, br_mode, '####set_system_param file_name :%s' %(ret[0]) )
+		self.svbkm.br_log(node_id, clster_name, br_mode, '####set_system_param file_name :%s' % (ret[0]))
 
 		self.limit_disk_size = int(conf.get('options', 'limit_disk_size'))
 		self.interval_time = int(conf.get('options', 'interval_time'))
-		self.opencenter_server_name=conf.get('options','opencenter_server_name')
+		self.opencenter_server_name = conf.get('options', 'opencenter_server_name')
 		self.storage_server_name = conf.get('options', 'storage_server_name')
+		self.clonezilla_server_name = conf.get('options', 'clonezilla_server_name')
 		self.loop_timeout_m = int(conf.get('options', 'loop_timeout_m'))
 
-		self.svbkm.br_log(node_id, clster_name, br_mode, '####read_file limit_disk_size :%s' %(self.limit_disk_size) )
-		self.svbkm.br_log(node_id, clster_name, br_mode, '####read_file interval_time :%s' %(self.interval_time) )
-		self.svbkm.br_log(node_id, clster_name, br_mode, '####read_file opencenter_server_name :%s' %(self.opencenter_server_name) )
-		self.svbkm.br_log(node_id, clster_name, br_mode, '####read_file storage_server_name :%s' %(self.storage_server_name) )
-		self.svbkm.br_log(node_id, clster_name, br_mode, '####read_file loop_timeout_m :%s' %(self.loop_timeout_m) )
+		self.svbkm.br_log(node_id, clster_name, br_mode, '####read_file limit_disk_size :%s' % (self.limit_disk_size))
+		self.svbkm.br_log(node_id, clster_name, br_mode, '####read_file interval_time :%s' % (self.interval_time))
+		self.svbkm.br_log(node_id, clster_name, br_mode, '####read_file opencenter_server_name :%s' % (self.opencenter_server_name))
+		self.svbkm.br_log(node_id, clster_name, br_mode, '####read_file storage_server_name :%s' % (self.storage_server_name))
+		self.svbkm.br_log(node_id, clster_name, br_mode, '####read_file clonezilla_server_name :%s' % (self.clonezilla_server_name))
+		self.svbkm.br_log(node_id, clster_name, br_mode, '####read_file loop_timeout_m :%s' % (self.loop_timeout_m))
 
 		return OK
 
@@ -239,7 +257,7 @@ class svrst_manager():
 			##################
 			#make file LogName
 			##################
-			self.svbkm.make_log_file_name(CLSTER_NAME,node_id,br_mode, restore_name="reset")
+			self.svbkm.make_log_file_name(CLSTER_NAME, node_id, br_mode, restore_name="reset")
 
 			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Mode check Start')
 
@@ -247,27 +265,57 @@ class svrst_manager():
 
 			if 1 == ret:
 				return ['NG', '#### reset already running']
-			elif -1==ret:
+			elif -1 == ret:
 				return ['NG', '#### While backup is running, can not reset']
 			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Mode check OK ')
 
-			###############
-			####Restore####
-			###############
-			retArray = self.reset_cluster_sub(node_id='', target_os=kwargs['target_os'])
+			####################
+			# Check Servertype #
+			####################
+			self.ori.set_auth(self.Token)
+			data = []
+			openorion_num = 0
+			fuel_num = 0
+			for server_name in self.server_list:
+				data_work = self.ori.get_node(server_name)
+				if -1 != data_work[0]:
+					data.append(data_work[1])
+					if data_work[1]["server_type"] == "001":
+						openorion_num += 1
+					elif data_work[1]["server_type"] == "002" or data_work[1]["server_type"] == "003":
+						fuel_num += 1
+				else:
+					print "get node info Error"
+
+			print data
+
+			# Fuel / OpenOrion miexd check
+			if openorion_num > 0 and fuel_num > 0:
+				print "enviroment server_type setting error"
+				retArray = ['NG', "Error"]
+			else:
+				###############
+				####Restore####
+				###############
+				if openorion_num > 0:
+					retArray = self.reset_cluster_sub(node_id='', target_os=kwargs['target_os'])
+				elif fuel_num > 0:
+					retArray = self.setup_fuelserver(data)
+				else:
+					retArray = ['OK', "Success"]
 
 			#set mode none
 			self.svbkc.set_mode_state(CLSTER_NAME, MODE_NONE)
 
 			return retArray
 
-		except Exception,e:
+		except Exception, e:
 			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Exception !! #####')
-			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### type   :'+ str(type(e)))
-			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### args   :'+ str(e.args))
-			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### message:'+ str(e.args))
-			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### e_self :'+str(e))
-			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### trace  :%s' %(traceback.format_exc()))
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### type   :' + str(type(e)))
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### args   :' + str(e.args))
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### message:' + str(e.args))
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### e_self :' + str(e))
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### trace  :%s' % (traceback.format_exc()))
 
 			#set mode none
 			self.svbkc.set_mode_state(CLSTER_NAME, MODE_NONE)
@@ -825,3 +873,378 @@ class svrst_manager():
 
 		self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Complete Success')
 		return ['OK', 'success']
+# Fuel --------
+	"""
+	def reset_fuelnode_reboot(self, hostname, username, password):
+
+		# Get Network info
+		nicinfo = fuel_utls.node_nic_info(self.Token, hostname)
+		server_ip = nicinfo.get_ip_address(nicinfo.M_PLANE)
+		server_bip = nicinfo.get_ip_address(nicinfo.B_PLANE)
+		if (server_ip == -1):
+			self.svbkm.b_log("", self.topology_name, '#### reset_fuelnode_reboot get_nic Error')
+			return -1
+		else:
+			print server_ip
+			server_ip = '172.16.10.180'
+			print server_bip
+			#server_bip = '172.16.1.180'
+
+		try:
+			s2 = pxssh.pxssh()
+			s2.login(server_ip, username, password)
+			s2.sendline('sudo reboot')
+			s2.expect('.*password for .*')
+			s2.sendline(password)
+			s2.prompt()
+			s2.logout()
+
+			return 0
+
+		except pxssh.ExceptionPxssh, e:
+			print "pxssh failed on login."
+			print str(e)
+
+		except pexpect.EOF:
+			# use bmc port reboot
+			print "pxssh failed on login. use bmc reboot"
+			ipmi = ipmi_client.IpmiClient()
+			#ipmi.run_reboot(server_bip)
+			ret = ipmi.get_all_status(server_bip)
+			print ret
+	"""
+
+	def setup_fuelserver(self, data):
+
+		#####################
+		#set predefine
+		#####################
+		br_mode = "r"
+		CLSTER_NAME = self.topology_name
+		node_id = ""
+
+		self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### setup_fuelserver Start ')
+
+		ret = self.set_system_param(CLSTER_NAME, node_id, br_mode)
+		if ret != 0:
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### set_system_param err')
+			return ['NG', '#### set_system_param err']
+
+		ret, tmpdata = self.get_server_info(self.clonezilla_server_name)
+		if ret == -1:
+			self.svbkm.b_log(node_id, CLSTER_NAME, '####setup_fuelserver ng file is nothing ')
+			return ['NG', 'Error']
+
+		clonezilla_info = {}
+		clonezilla_info['ip_address'] = tmpdata['ip_address']
+		clonezilla_info['username'] = tmpdata['user_name']
+		clonezilla_info['password'] = tmpdata['password']
+
+		node_num = 0
+
+		server_info = {}
+		# Set FuelServer info
+		for node_info in data:
+			if node_info['server_type'] == FUEL_SERVER:
+				server_info['hostname'] = node_info['device_name']
+				server_info['username'] = node_info['user_name']
+				server_info['password'] = node_info['password']
+				server_info['img_name'] = FUEL_IMG
+
+				# Get Network info
+				nicinfo = fuel_utls.node_nic_info(self.Token, server_info['hostname'])
+				server_info['ip_address'] = nicinfo.get_ip_address(nicinfo.M_PLANE)
+				server_info['ip_address_c'] = nicinfo.get_ip_address(nicinfo.C_PLANE)
+
+				if (server_info['ip_address'] == -1) or (server_info['ip_address_c'] == -1):
+					self.svbkm.b_log(node_id, CLSTER_NAME, '#### setup_fuelserver Error')
+					return ['NG', 'Error']
+				else:
+					print server_info
+
+				node_num += 1
+
+		# Fuel Server num Check
+		if node_num > 1:
+			print "Error"
+			return ['NG', 'Error']
+
+		ret = fuel_utls.clonezilla_exec(self.Token, fuel_utls.MODE_RESTORE, clonezilla_info, [server_info], 1)
+		if ret == -1:
+			self.svbkm.b_log("", self.topology_name, '####setup_fuelserver ng file is nothing ')
+			return ['NG', 'Error']
+
+		return ['OK', 'success']
+
+		"""
+		try:
+			s = pxssh.pxssh()
+			s.login(clonezilla_serverip, clonezilla_username, clonezilla_password)
+
+			cmd = 'sudo drbl-ocs -b -g auto -e1 auto -e2 -r -x -j2 -p reboot -h "' + \
+									server_cip + \
+									'" -l ja_JP.UTF-8 startdisk restore ' + FUEL_IMG + ' sda'
+			#print cmd
+			#--- Fuel Server image restore command to Clonsezilla
+			s.sendline(cmd)
+			s.expect('.*password for .*')
+			s.sendline(clonezilla_password)
+			s.prompt()
+
+			#--- reboot Fuel node
+			ret = fuel_utls.node_reboot(self.Token, hostname, username, password)
+			if ret != 0:
+				#TODO
+				return ['NG', 'Error']
+
+			#--- wait for finish restore
+			s.expect('You are in clonezilla box mode!')
+			s.sendline('tail -f /var/log/clonezilla/clonezilla-jobs.log')
+			chk_string_src = 'client ' + server_cip
+			chk_string = chk_string_src.replace('.', '\.')
+			# print chk_string
+			s.expect(chk_string, timeout=20*60)
+			s.sendcontrol('c')
+			s.prompt()
+			logs = s.before
+			print logs
+
+			#--- check error
+			# todo
+
+			s.logout()
+
+			return ['OK', 'success']
+
+		except pxssh.ExceptionPxssh, e:
+			print "pxssh failed on login."
+			print str(e)
+		"""
+
+	def get_server_info(self, server_name):
+
+		server_info = {}
+		ori = ool_rm_if.ool_rm_if()
+		ori.set_auth(self.Token)
+
+		#get IP address
+		data = ori.get_nic_traffic_info(server_name, 'M-Plane')
+		#data_c = ori.get_nic_traffic_info(server_name, 'C-Plane')
+		if (-1 != data[0]):
+			server_info['ip_address'] = data[1][0]['ip_address']
+			#server_info[C_IP_INDEX] = data_c[1][0]['ip_address']
+		else:
+			# todo
+			#self.br_log(node_id, name, br_mode, "nic traffic_type error:%s" % (data[1]))
+			return -1
+
+		#get username password
+		data = ori.get_device(server_name)
+		ret = 0
+
+		if -1 != data[0]:
+			#input server info
+			server_info['user_name'] = data[1]['user_name']
+			server_info['password'] = data[1]['password']
+		else:
+			#self.br_log(node_id, name, br_mode, "set_server_info <device error:+ data[0]=%s " % (data[0]))
+			ret = -1
+
+		return ret, server_info
+
+	def reset_fuelenviroment(self, **kwargs):
+		try:
+			br_mode = "r"
+			node_id = INIT_NODE
+			CLSTER_NAME = self.topology_name
+
+			#####################
+			#set prefix log title
+			#####################
+			self.svbkm.set_log_Title('TS_%s_%s_' % (self.tenant_name, CLSTER_NAME))
+
+			##################
+			#make file LogName
+			##################
+			self.svbkm.make_log_file_name(CLSTER_NAME, node_id, br_mode, restore_name="reset")
+
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Mode check Start')
+
+			ret = self._reset_precheck(br_mode, CLSTER_NAME)
+
+			if 1 == ret:
+				return ['NG', '#### reset already running']
+			elif -1 == ret:
+				return ['NG', '#### While backup is running, can not reset']
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Mode check OK ')
+
+			####################
+			# Check Servertype #
+			####################
+			self.ori.set_auth(self.Token)
+			data = []
+			for server_name in self.server_list:
+				data_work = self.ori.get_node(server_name)
+				if -1 != data_work[0]:
+					# Fuel Server or Agent
+					if (data_work[1]["server_type"] == FUEL_SERVER) or \
+								(data_work[1]["server_type"] == FUEL_AGENT):
+						data.append(data_work[1])
+				else:
+					print "get node info Error"
+					return ['NG', "get node info error from resouce manager "]
+
+			print data
+
+			# Fuel agent check
+			if len(data) == 0:
+				return ['OK', "success"]
+
+			###############
+			####Restore####
+			###############
+			retArray = self.init_fuelenv(data)
+
+			#set mode none
+			self.svbkc.set_mode_state(CLSTER_NAME, MODE_NONE)
+
+			return retArray
+
+		except Exception, e:
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Exception !! #####')
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### type   :' + str(type(e)))
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### args   :' + str(e.args))
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### message:' + str(e.args))
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### e_self :' + str(e))
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### trace  :%s' % (traceback.format_exc()))
+
+			#set mode none
+			self.svbkc.set_mode_state(CLSTER_NAME, MODE_NONE)
+
+			raise
+
+	def init_fuelenv(self, data):
+
+		#####################
+		#set predefine
+		#####################
+		node_id = ""
+		br_mode = "r"
+		CLSTER_NAME = self.topology_name
+
+		self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### init_fuelenv Start')
+
+		# Get FuelServer info
+		for node_info in data:
+			if node_info['server_type'] == FUEL_SERVER:
+				hostname = node_info['device_name']
+				username = node_info['user_name']
+				password = node_info['password']
+
+		if len(node_info) < 1:
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Get FuelServer info Error')
+			return ['NG', "Error"]
+
+		# Custamize FuelServer network setting
+		ret = self.wait_fuelserver_startup(hostname, username, password)
+		if ret == -1:
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Init FuelServer env Error')
+			return ['NG', 'Error']
+
+		# Reboot Fuel Agent
+		for node_info in data:
+			if node_info['server_type'] == FUEL_AGENT:
+				hostname = node_info['device_name']
+				username = node_info['user_name']
+				password = node_info['password']
+
+				# server reboot
+				ret = fuel_utls.node_reboot(self.Token, hostname, username, password)
+				if ret != 0:
+					# TODO
+					return ['NG', 'Error']
+
+		self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### init_fuelenv End')
+		return ['OK', 'Success']
+
+	@retry(pexpect.EOF, tries=100, delay=10)
+	def wait_fuelserver_startup(self, hostname, username, password):
+
+		self.svbkm.b_log(hostname, self.topology_name, '#### init_fuelserver_env Start')
+
+		# Get C-Plane/M-Plane address
+		nicinfo = fuel_utls.node_nic_info(self.Token, hostname)
+
+		server_mip = nicinfo.get_ip_address(nicinfo.M_PLANE)
+		if (server_mip == -1):
+			self.svbkm.b_log(hostname, self.topology_name, '#### init_fuelserver_env get M_PLANE Error')
+			return -1
+
+		# vvv--- ÒÔÏÂÏ÷³ýÓè¶¨(move to NCS)
+		server_cip = nicinfo.get_ip_address(nicinfo.C_PLANE)
+		server_cgw = nicinfo.get_gw_address(nicinfo.C_PLANE)
+		if (server_cip == -1) or (server_cgw == -1):
+			self.svbkm.b_log(hostname, self.topology_name, '#### init_fuelserver_env get C_PLANE Error')
+			return -1
+		# ^^^---
+
+		#--- Set Public network env
+		try:
+			s = pxssh.pxssh()
+			s.login(server_mip, username, password, login_timeout=10*60)
+
+			# vvv--- ÒÔÏÂÏ÷³ýÓè¶¨(move to NCS)
+			#--- Set Public network ipaddress
+			server_ip = server_cip.replace('.', '\.')
+			cmd = 'sudo sed -i -e s/192\.168\.100\.100/' + server_ip + \
+									'/ /etc/sysconfig/network-scripts/ifcfg-eth2'
+			#print cmd
+
+			s.sendline(cmd)
+			s.expect('.*password for .*')
+			s.sendline(password)
+			s.prompt()
+			#print s.before
+
+			#--- Set Public gateway address
+			gw_ip = server_cgw.replace('.', '\.')
+			cmd = 'sudo sed -i -e s/192\.168\.100\.1/' + gw_ip + \
+									'/ /etc/sysconfig/network-scripts/ifcfg-eth2'
+			#print cmd
+
+			s.sendline(cmd)
+			s.prompt()
+			#print s.before
+
+			# Netwrok restart FuelServer(olny CentOS)
+			"""
+			if (os.path.exists('/etc/lsb-release') == True):
+				# Ubuntu
+				s.sendline ('sudo /etc/init.d/network restart')
+			else:
+				# CentOS
+				s.sendline ('sudo service network restart')
+			"""
+			s.sendline('sudo service network restart')
+			s.prompt()
+			logs = s.before
+			# ^^^---
+			# DHCP Start check
+			s.sendline('sudo tail -f /var/log/docker-logs/dnsmasq.log')
+			s.expect("started", timeout=20*60)
+			s.logout()
+
+		except pxssh.ExceptionPxssh, e:
+			print "pxssh failed on login."
+			print str(e)
+
+		# vvv--- ÒÔÏÂÏ÷³ýÓè¶¨(move to NCS)
+		#--- check error
+		#print logs
+		if "NG" in logs:
+			self.svbkm.b_log(hostname, self.topology_name, '#### init_fuelserver_env network restart error')
+			return -1
+		# ^^^---
+
+		self.svbkm.b_log(hostname, self.topology_name, '#### init_fuelserver_env End')
+		return 0
