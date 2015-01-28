@@ -49,6 +49,8 @@ BASE_DIR_NAME="/backup"
 MASTER_ENV='BASE'
 RESET_ENV='INITIALIZE'
 INIT_NODE=0
+#TODO
+STOP_NODE = 999
 
 OK=0
 NG=-1
@@ -82,11 +84,13 @@ SEND_YES='yes'
 DEFAULT_OS='Ubuntu_12.04LTS'
 # Fuel restore image name
 FUEL_IMG = 'fuel511-img'
+FUEL6_IMG = 'fuel600-img'
 
 # Server Type
 OPENORION_AGENT = '001'
 FUEL_SERVER = '002'
 FUEL_AGENT = '003'
+FUEL6_SERVER = '004'
 NON_ASSIGNMENT = '999'
 
 #---------------------------------------------------------
@@ -253,7 +257,7 @@ class svrst_manager():
 			#set prefix log title
 			#####################
 			self.svbkm.set_log_Title('TS_%s_%s_' % (self.tenant_name, CLSTER_NAME))
-			
+
 			##################
 			#make file LogName
 			##################
@@ -945,11 +949,16 @@ class svrst_manager():
 		server_info = {}
 		# Set FuelServer info
 		for node_info in data:
-			if node_info['server_type'] == FUEL_SERVER:
+			if (node_info['server_type'] == FUEL_SERVER) or \
+				(node_info['server_type'] == FUEL6_SERVER):
 				server_info['hostname'] = node_info['device_name']
 				server_info['username'] = node_info['user_name']
 				server_info['password'] = node_info['password']
-				server_info['img_name'] = FUEL_IMG
+
+				if node_info['server_type'] == FUEL_SERVER:
+					server_info['img_name'] = FUEL_IMG
+				else:
+					server_info['img_name'] = FUEL6_IMG
 
 				# Get Network info
 				nicinfo = fuel_utls.node_nic_info(self.Token, server_info['hostname'])
@@ -1088,7 +1097,8 @@ class svrst_manager():
 				if -1 != data_work[0]:
 					# Fuel Server or Agent
 					if (data_work[1]["server_type"] == FUEL_SERVER) or \
-								(data_work[1]["server_type"] == FUEL_AGENT):
+						(data_work[1]["server_type"] == FUEL6_SERVER) or \
+						(data_work[1]["server_type"] == FUEL_AGENT):
 						data.append(data_work[1])
 				else:
 					print "get node info Error"
@@ -1136,7 +1146,8 @@ class svrst_manager():
 
 		# Get FuelServer info
 		for node_info in data:
-			if node_info['server_type'] == FUEL_SERVER:
+			if (node_info['server_type'] == FUEL_SERVER) or \
+				(node_info['server_type'] == FUEL6_SERVER):
 				hostname = node_info['device_name']
 				username = node_info['user_name']
 				password = node_info['password']
@@ -1180,7 +1191,7 @@ class svrst_manager():
 			self.svbkm.b_log(hostname, self.topology_name, '#### init_fuelserver_env get M_PLANE Error')
 			return -1
 
-		# vvv--- ÒÔÏÂÏ÷³ýÓè¶¨(move to NCS)
+		# vvv--- Delete schedule (move to NCS)
 		server_cip = nicinfo.get_ip_address(nicinfo.C_PLANE)
 		server_cgw = nicinfo.get_gw_address(nicinfo.C_PLANE)
 		if (server_cip == -1) or (server_cgw == -1):
@@ -1193,10 +1204,10 @@ class svrst_manager():
 			s = pxssh.pxssh()
 			s.login(server_mip, username, password, login_timeout=10*60)
 
-			# vvv--- ÒÔÏÂÏ÷³ýÓè¶¨(move to NCS)
+			# vvv--- Delete schedule(move to NCS)
 			#--- Set Public network ipaddress
 			server_ip = server_cip.replace('.', '\.')
-			cmd = 'sudo sed -i -e s/192\.168\.100\.100/' + server_ip + \
+			cmd = 'sudo sed -i -e s/192\.168\.1\.180/' + server_ip + \
 									'/ /etc/sysconfig/network-scripts/ifcfg-eth2'
 			#print cmd
 
@@ -1208,7 +1219,7 @@ class svrst_manager():
 
 			#--- Set Public gateway address
 			gw_ip = server_cgw.replace('.', '\.')
-			cmd = 'sudo sed -i -e s/192\.168\.100\.1/' + gw_ip + \
+			cmd = 'sudo sed -i -e s/192\.168\.1\.254/' + gw_ip + \
 									'/ /etc/sysconfig/network-scripts/ifcfg-eth2'
 			#print cmd
 
@@ -1228,17 +1239,22 @@ class svrst_manager():
 			s.sendline('sudo service network restart')
 			s.prompt()
 			logs = s.before
+			print s.before
 			# ^^^---
+
 			# DHCP Start check
-			s.sendline('sudo tail -f /var/log/docker-logs/dnsmasq.log')
+			s.sendline('sudo tail -n 100 -f /var/log/docker-logs/dnsmasq.log')
+			#s.expect('.*password for .*')
+			#s.sendline(password)
 			s.expect("started", timeout=20*60)
+			s.sendcontrol('c')
 			s.logout()
 
 		except pxssh.ExceptionPxssh, e:
 			print "pxssh failed on login."
 			print str(e)
 
-		# vvv--- ÒÔÏÂÏ÷³ýÓè¶¨(move to NCS)
+		# vvv--- Delete schedule(move to NCS)
 		#--- check error
 		#print logs
 		if "NG" in logs:
@@ -1247,4 +1263,150 @@ class svrst_manager():
 		# ^^^---
 
 		self.svbkm.b_log(hostname, self.topology_name, '#### init_fuelserver_env End')
+		return 0
+
+	def teardown_server(self, **kwargs):
+		try:
+			br_mode = "stop"
+			node_id = STOP_NODE
+			CLSTER_NAME = self.topology_name
+
+			#####################
+			#set prefix log title
+			#####################
+			self.svbkm.set_log_Title('TS_%s_%s_' % (self.tenant_name, CLSTER_NAME))
+
+			##################
+			#make file LogName
+			##################
+			self.svbkm.make_log_file_name(CLSTER_NAME, node_id, br_mode, restore_name="reset")
+
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Mode check Start')
+
+			"""
+			ret = self._reset_precheck(br_mode, CLSTER_NAME)
+
+			if 1 == ret:
+				return ['NG', '#### reset already running']
+			elif -1 == ret:
+				return ['NG', '#### While backup is running, can not reset']
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Mode check OK ')
+			"""
+
+			####################
+			# Check Servertype #
+			####################
+			self.ori.set_auth(self.Token)
+			data = []
+			for server_name in self.server_list:
+				data_work = self.ori.get_node(server_name)
+				if -1 != data_work[0]:
+					# Fuel Server or Agent
+					if (data_work[1]["server_type"] == FUEL_SERVER) or \
+						(data_work[1]["server_type"] == FUEL6_SERVER):
+						data.append(data_work[1])
+				else:
+					print "get node info Error"
+					return ['NG', "get node info error from resouce manager "]
+
+			print data
+
+			# Fuel agent check
+			if len(data) == 0:
+				return ['OK', "success"]
+
+			###############
+			####TearDown####
+			###############
+			retArray = self.teardown_fuelserver(data)
+
+			#set mode none
+			#self.svbkc.set_mode_state(CLSTER_NAME, MODE_NONE)
+
+			return retArray
+
+		except Exception, e:
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Exception !! #####')
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### type   :' + str(type(e)))
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### args   :' + str(e.args))
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### message:' + str(e.args))
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### e_self :' + str(e))
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### trace  :%s' % (traceback.format_exc()))
+
+			#set mode none
+			#self.svbkc.set_mode_state(CLSTER_NAME, MODE_NONE)
+
+			raise
+
+	def teardown_fuelserver(self, data):
+
+		#####################
+		#set predefine
+		#####################
+		node_id = ""
+		br_mode = "stop"
+		CLSTER_NAME = self.topology_name
+
+		self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### teardown_fuelserver Start')
+
+		# Get FuelServer info
+		for node_info in data:
+			hostname = node_info['device_name']
+			username = node_info['user_name']
+			password = node_info['password']
+
+			# Disable FuelServer NIC1(DHCP working)
+			ret = self.disable_fuelserver_hdcp(hostname, username, password)
+			if ret == -1:
+				self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Disable FuelServer NIC1 Error')
+				return ['NG', 'Error']
+
+		self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### teardown_fuelserver End')
+		return ['OK', 'Success']
+
+	def disable_fuelserver_hdcp(self, hostname, username, password):
+
+		self.svbkm.b_log(hostname, self.topology_name, '#### disable_fuelserver_hdcp Start')
+
+		# Get M-Plane address
+		nicinfo = fuel_utls.node_nic_info(self.Token, hostname)
+
+		server_mip = nicinfo.get_ip_address(nicinfo.M_PLANE)
+		if (server_mip == -1):
+			self.svbkm.b_log(hostname, self.topology_name, '#### disable_fuelserver_hdcp get M_PLANE Error')
+			return -1
+
+		#--- disable eth0
+		try:
+			s = pxssh.pxssh()
+			s.login(server_mip, username, password)
+
+			#--- Set Public network ipaddress
+			cmd = 'sudo sed -i -e s/ONBOOT=yes/ONBOOT=no' \
+									'/ /etc/sysconfig/network-scripts/ifcfg-eth0'
+			#print cmd
+
+			s.sendline(cmd)
+			s.expect('.*password for .*')
+			s.sendline(password)
+			s.prompt()
+			#print s.before
+
+			s.sendline('sudo service network restart')
+			s.prompt()
+			logs = s.before
+			s.logout()
+
+		except pxssh.ExceptionPxssh, e:
+			print "pxssh failed on login."
+			print str(e)
+
+		#--- check error
+		#print logs
+		if "NG" in logs:
+			self.svbkm.b_log(hostname, self.topology_name, '#### network restart error')
+			return -1
+		# ^^^---
+
+		self.svbkm.b_log(hostname, self.topology_name, '#### disable_fuelserver_hdcp End')
 		return 0

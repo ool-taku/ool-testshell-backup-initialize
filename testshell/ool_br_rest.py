@@ -132,6 +132,7 @@ def reset():
 		br_mode = req_data[KEY_BR_MODE]
 		if (('r' != br_mode) and ('b' != br_mode) and
 					('i' != br_mode) and ('post_init' != br_mode) and
+					('teardown' != br_mode) and
 					('r_info' != br_mode) and ('del' != br_mode)):
 			err_msg = KEY_BR_MODE
 			raise Exception
@@ -234,6 +235,20 @@ def reset():
 
 		ret = svrst.reset_fuelenviroment()
 
+		res_data.update({KEY_STATUS: ret[0]})
+		res_data.update({KEY_MSG: ret[1]})
+
+	if 'teardown' == br_mode:
+		svrst = svrst_manager.svrst_manager()
+		svrst.set_Token(Token)
+		ret = svrst.set_node_list(node_list)
+		if ret == -1:
+			res = Response()
+			res.status_code = 400
+			res.data = json.dumps({"status": "NG", "msg": "bad parameter:key(KEY_TOKEN is invalid)"})
+			return res
+
+		ret = svrst.teardown_server(topology_name=topology_name, tenant_name=tenant_name)
 		res_data.update({KEY_STATUS: ret[0]})
 		res_data.update({KEY_MSG: ret[1]})
 
