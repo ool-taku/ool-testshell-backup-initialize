@@ -25,9 +25,8 @@ KEY_STATUS='status'
 KEY_MSG='msg'
 KEY_TARGET_OS='target_os'
 
-#TODO
 #FILEDIR="/etc/backuprestore"
-FILEDIR = "/home/openstack/flask-env"
+FILEDIR = "/etc/ool_br_rest"
 CONFIG_FILE = 'ool_br_rest.ini'
 
 logger = logging.getLogger('bktestShelllog')
@@ -266,5 +265,5 @@ if __name__ == "__main__":
 
 	ret = set_system_param()
 	if 0 == ret[0]:
-		app.run(host=ret[1], port=int(ret[2]))
+		app.run(host=ret[1], port=int(ret[2]), processes=3)
 

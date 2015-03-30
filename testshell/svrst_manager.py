@@ -42,9 +42,8 @@ START_INDEX	=1
 R_END_STATUS="restore_ok"
 R_NG_STATUS="restore_ng"
 
-#TODO
 #FILEDIR="/etc/backuprestore"
-FILEDIR="/home/openstack/flask-env"
+FILEDIR="/etc/ool_br_rest"
 BASE_DIR_NAME="/backup"
 MASTER_ENV='BASE'
 RESET_ENV='INITIALIZE'
@@ -85,6 +84,7 @@ DEFAULT_OS='Ubuntu_12.04LTS'
 # Fuel restore image name
 FUEL_IMG = 'fuel511-img'
 FUEL6_IMG = 'fuel600-img'
+UBUNTU12_IMG = 'ubuntu12-img'
 
 # Server Type
 OPENORION_AGENT = '001'
@@ -93,12 +93,37 @@ FUEL_AGENT = '003'
 FUEL6_SERVER = '004'
 NON_ASSIGNMENT = '999'
 
+# put
+OPENORION_HOST = '172.16.1.51'
+HTTP_PORT = '58080'
+
+PUT_CMD = 'PUT'
+PUT_HEADER = "'Content-type: application/json'"
+
+BASE_SRV_URL = "http://%s:%s/switches"
+QUERY_PARA   = ""
+SRV_URL = BASE_SRV_URL + QUERY_PARA
+
+#PUT_DATA = '-d "{"switches":%s}"'
+PUT_DATA = '"{"switches":%s}"'
+
+# curl [opt] [hdr] [url] [data]
+CURL_CMD = "'curl -X %s -H %s '%s' %s'"
+
+class runError(Exception):
+    def __init__(self, value):
+        self.msg = value
+    def __str__(self):
+        return repr(self.msg)
+
 #---------------------------------------------------------
 class svrst_manager():
 	def __init__(self):
 		logger = logging.getLogger('rstlog')
 		logger.setLevel(logging.DEBUG)
-		handler = logging.handlers.SysLogHandler(address = '/dev/log')
+#		handler = logging.handlers.SysLogHandler(address = '/dev/log')
+		handler = logging.handlers.WatchedFileHandler('/var/log/testbed/ool-brst.log')
+		handler.setFormatter(logging.Formatter(fmt='%(asctime)s.%(msecs)03d %(process)d [%(levelname)s] [-] %(message)s'))
 		logger.addHandler(handler)
 		self.logObj=logger
 
@@ -120,16 +145,16 @@ class svrst_manager():
 		self.connector=''
 
 	def set_node_list(self, node_list):
-		svbkutl=svbk_utls.svbk_utls()
+		svbkutl = svbk_utls.svbk_utls()
 		svbkutl.set_auth(self.Token)
-		node_list=svbkutl.separate_node(node_list)
+		tmp_node_list = svbkutl.separate_node(node_list)
 
-		if ((-1 == node_list[SV_NAME]) or (-1 == node_list[SW_NAME])):
+		if ((-1 == tmp_node_list[SV_NAME]) or (-1 == tmp_node_list[SW_NAME])):
 			return -1
 		
-		self.node_list=node_list
-		self.server_list=node_list[SV_NAME]
-		self.switch_list=node_list[SW_NAME]
+		self.node_list = node_list
+		self.server_list = tmp_node_list[SV_NAME]
+		self.switch_list = tmp_node_list[SW_NAME]
 		return 0
 	
 	def set_Token(self, Token):
@@ -263,7 +288,7 @@ class svrst_manager():
 			##################
 			self.svbkm.make_log_file_name(CLSTER_NAME, node_id, br_mode, restore_name="reset")
 
-			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Mode check Start')
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Mode check Start(reset_cluster)')
 
 			ret = self._reset_precheck(br_mode, CLSTER_NAME)
 
@@ -271,7 +296,7 @@ class svrst_manager():
 				return ['NG', '#### reset already running']
 			elif -1 == ret:
 				return ['NG', '#### While backup is running, can not reset']
-			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Mode check OK ')
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Mode check OK(reset_cluster) ')
 
 			####################
 			# Check Servertype #
@@ -280,13 +305,16 @@ class svrst_manager():
 			data = []
 			openorion_num = 0
 			fuel_num = 0
+			
 			for server_name in self.server_list:
 				data_work = self.ori.get_node(server_name)
 				if -1 != data_work[0]:
 					data.append(data_work[1])
-					if data_work[1]["server_type"] == "001":
+					if data_work[1]["server_type"] == OPENORION_AGENT:
 						openorion_num += 1
-					elif data_work[1]["server_type"] == "002" or data_work[1]["server_type"] == "003":
+					elif data_work[1]["server_type"] == FUEL_SERVER or \
+						data_work[1]["server_type"] == FUEL6_SERVER or \
+						data_work[1]["server_type"] == FUEL_AGENT:
 						fuel_num += 1
 				else:
 					print "get node info Error"
@@ -302,11 +330,12 @@ class svrst_manager():
 				####Restore####
 				###############
 				if openorion_num > 0:
-					retArray = self.reset_cluster_sub(node_id='', target_os=kwargs['target_os'])
+					retArray = self.restore_osimage(data)
 				elif fuel_num > 0:
 					retArray = self.setup_fuelserver(data)
 				else:
-					retArray = ['OK', "Success"]
+					retArray = self.restore_osimage(data)
+					#retArray = ['OK', "Success"]
 
 			#set mode none
 			self.svbkc.set_mode_state(CLSTER_NAME, MODE_NONE)
@@ -395,7 +424,9 @@ class svrst_manager():
 		########################
 		self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Set Storage Server info')
 
-		retdata = self.svbkm.set_server_info_SPlane(node_id, server_info[0], self.storage_server_name, CLSTER_NAME, br_mode)
+		# Network expansion  
+		#retdata = self.svbkm.set_server_info_SPlane(node_id, server_info[0], self.storage_server_name, CLSTER_NAME, br_mode)
+		retdata = self.svbkm.set_server_info(node_id, server_info[0], self.storage_server_name, CLSTER_NAME, br_mode)
 
 		if 0 != retdata[0]:
 			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### server info set err')
@@ -458,7 +489,8 @@ class svrst_manager():
 		for i in range(1, server_cnt):
 			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, 'Set Server info server_node_name[%s]=%s' %( (i-1), server_node_name[i-1] ) )
 
-			retdata = self.svbkm.set_server_info_CPlane(node_id, server_info[i], server_node_name[i-1], CLSTER_NAME, br_mode)
+			#retdata = self.svbkm.set_server_info_CPlane(node_id, server_info[i], server_node_name[i-1], CLSTER_NAME, br_mode)
+			retdata = self.svbkm.set_server_info(node_id, server_info[i], server_node_name[i-1], CLSTER_NAME, br_mode)
 			if 0 != retdata[0]:
 				self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Set Server info  server_node_name=%s' %(server_node_name[i-1] ) )
 
@@ -560,6 +592,10 @@ class svrst_manager():
 				self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, msg )
 				return ['NG', msg]
 
+			# 誤ってlocalhostのNICの情報を取得しているようなのでコメントアウトする
+			# vvv ----------
+			nic_rule = ''
+			"""
 			# set nic rule
 			# get mac_address from resourcedb
 			ret = svbkutl.get_macaddr(self.server_list[i-1])
@@ -625,6 +661,8 @@ class svrst_manager():
 						else:
 							nic_rule= '%s,eth%s,%s' % (nic_rule, k,own_bus_info[k])
 						break;
+			"""
+			# ^^^----------
 
 			nic_rule=nic_rule + ",end,end"
 			cmd='ssh root@%s /boot/%s %s %s r %s %s %s %s %s %s' % (server_info[i][IP_INDEX], svbkutl.get_br_agent_name(), server_info[i][USER_INDEX], server_info[i][PW_INDEX], SAVE_DIR_NAME, server_info[STORAGE_SV][IP_INDEX], server_info[STORAGE_SV][USER_INDEX],  server_info[STORAGE_SV][PW_INDEX], target_os, nic_rule)
@@ -963,7 +1001,7 @@ class svrst_manager():
 				# Get Network info
 				nicinfo = fuel_utls.node_nic_info(self.Token, server_info['hostname'])
 				server_info['ip_address'] = nicinfo.get_ip_address(nicinfo.M_PLANE)
-				server_info['ip_address_c'] = nicinfo.get_ip_address(nicinfo.C_PLANE)
+				server_info['ip_address_c'] = nicinfo.get_ip_address(nicinfo.M2_PLANE)
 
 				if (server_info['ip_address'] == -1) or (server_info['ip_address_c'] == -1):
 					self.svbkm.b_log(node_id, CLSTER_NAME, '#### setup_fuelserver Error')
@@ -978,9 +1016,16 @@ class svrst_manager():
 			print "Error"
 			return ['NG', 'Error']
 
-		ret = fuel_utls.clonezilla_exec(self.Token, fuel_utls.MODE_RESTORE, clonezilla_info, [server_info], 1)
+		ret = fuel_utls.clonezilla_exec(
+			self.Token, fuel_utls.MODE_RESTORE, clonezilla_info, [server_info], 1)
 		if ret == -1:
 			self.svbkm.b_log("", self.topology_name, '####setup_fuelserver ng file is nothing ')
+			return ['NG', 'Error']
+
+		ret = self.wait_fuelserver_startup(
+			server_info['hostname'], server_info['username'], server_info['password'])
+		if ret == -1:
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Init FuelServer env Error')
 			return ['NG', 'Error']
 
 		return ['OK', 'success']
@@ -1030,6 +1075,99 @@ class svrst_manager():
 			print str(e)
 		"""
 
+	def restore_osimage(self, data):
+
+		#####################
+		# set predefine
+		#####################
+		br_mode = "r"
+		CLSTER_NAME = self.topology_name
+		node_id = ""
+
+		self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '####  Start restore_osimage')
+
+		ret = self.set_system_param(CLSTER_NAME, node_id, br_mode)
+		if ret != 0:
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### set_system_param err')
+			return ['NG', '#### set_system_param err']
+
+		ret, tmpdata = self.get_server_info(self.clonezilla_server_name)
+		if ret == -1:
+			self.svbkm.b_log(node_id, CLSTER_NAME, '####restore_osimage ng file is nothing ')
+			return ['NG', 'Error']
+
+		clonezilla_info = {}
+		clonezilla_info['ip_address'] = tmpdata['ip_address']
+		clonezilla_info['username'] = tmpdata['user_name']
+		clonezilla_info['password'] = tmpdata['password']
+
+		node_num = 0
+
+		server_info = []
+		# Set FuelServer info
+		for node_info in data:
+			if (node_info['server_type'] == NON_ASSIGNMENT) or \
+				(node_info['server_type'] == OPENORION_AGENT):
+				tmp_server_info = {}
+				tmp_server_info['hostname'] = node_info['device_name']
+				tmp_server_info['username'] = node_info['user_name']
+				tmp_server_info['password'] = node_info['password']
+				tmp_server_info['img_name'] = UBUNTU12_IMG
+
+				# Get Network info
+				nicinfo = fuel_utls.node_nic_info(self.Token, tmp_server_info['hostname'])
+				tmp_server_info['ip_address'] = nicinfo.get_ip_address(nicinfo.M_PLANE)
+				tmp_server_info['ip_address_c'] = nicinfo.get_ip_address(nicinfo.M2_PLANE)
+
+				if (tmp_server_info['ip_address'] == -1) or (tmp_server_info['ip_address_c'] == -1):
+					self.svbkm.b_log(node_id, CLSTER_NAME, '#### restore_osimage Error')
+					return ['NG', 'Error']
+				else:
+					print tmp_server_info
+				server_info.append(tmp_server_info)
+
+				node_num += 1
+
+		ret = fuel_utls.clonezilla_exec(
+			self.Token, fuel_utls.MODE_RESTORE, clonezilla_info, server_info, node_num)
+		if ret == -1:
+			self.svbkm.b_log("", self.topology_name, '####restore_osimage ng file is nothing ')
+			return ['NG', 'Error']
+
+		setup_sts = 0
+		devices = []
+		for server in server_info:
+			ret = self.wait_os_startup(
+				server['hostname'], server['username'], server['password'])
+			device_name = {"deviceName": server['hostname']}
+			devices.append(device_name)
+			if ret == -1:
+				self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### restore_osimage env Error')
+				setup_sts = -1
+
+		# set mac mapping
+		# Grubメニューでストップする場合の回避処理
+		# 起動途中で設定が動作し、起動完了前にリブートしてしまわないようにwaitする。
+		#time.sleep(90)
+		url = 'http://172.16.1.98:8080/ncs/v2/mac_mapping'
+		param = {"auth": self.Token, "params": devices}
+		code, mgg = fuel_utls.http_request(url, param, 'PUT')
+		if code != 200:
+			self.svbkm.b_log("", self.topology_name, '####restore_osimage mac_mapping NG')
+
+
+		# Init SW
+		ret = self.reset_switch(self.Token, self.node_list)
+		if ret[0] == 'NG':
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### restore_osimage rest switch Error')
+			setup_sts = -1
+			#return ['NG', 'Error']
+
+		if setup_sts == -1:
+			return ['NG', 'Error']
+
+		return ['OK', 'success']
+
 	def get_server_info(self, server_name):
 
 		server_info = {}
@@ -1077,7 +1215,7 @@ class svrst_manager():
 			##################
 			self.svbkm.make_log_file_name(CLSTER_NAME, node_id, br_mode, restore_name="reset")
 
-			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Mode check Start')
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Mode check Start(reset_fuelenviroment)')
 
 			ret = self._reset_precheck(br_mode, CLSTER_NAME)
 
@@ -1085,37 +1223,50 @@ class svrst_manager():
 				return ['NG', '#### reset already running']
 			elif -1 == ret:
 				return ['NG', '#### While backup is running, can not reset']
-			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Mode check OK ')
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Mode check OK(reset_fuelenviroment) ')
 
 			####################
 			# Check Servertype #
 			####################
 			self.ori.set_auth(self.Token)
 			data = []
+			na_node_list = []
+			fuel_flag = 0
+			openorion_flg = 0
 			for server_name in self.server_list:
 				data_work = self.ori.get_node(server_name)
 				if -1 != data_work[0]:
+					na_node_list.append(data_work[1])
 					# Fuel Server or Agent
 					if (data_work[1]["server_type"] == FUEL_SERVER) or \
 						(data_work[1]["server_type"] == FUEL6_SERVER) or \
 						(data_work[1]["server_type"] == FUEL_AGENT):
+						fuel_flag += 1
 						data.append(data_work[1])
+					elif data_work[1]["server_type"] == OPENORION_AGENT:
+						openorion_flg += 1
 				else:
+					self.svbkc.set_mode_state(CLSTER_NAME, MODE_NONE)
 					print "get node info Error"
 					return ['NG', "get node info error from resouce manager "]
 
 			print data
 
-			# Fuel agent check
-			if len(data) == 0:
-				return ['OK', "success"]
+			# Fuel / OpenOrion miexd check
+			if openorion_flg > 0 and fuel_flag > 0:
+				print "enviroment server_type setting error"
+				retArray = ['NG', "enviroment server_type setting error"]
+			else:
+				if openorion_flg > 0:
+					self.svbkc.set_mode_state(CLSTER_NAME, MODE_NONE)
+					retArray = self.init_oo_env(na_node_list)
+				elif fuel_flag > 0:
+					retArray = self.init_fuelenv(data)
+				else:
+					retArray = self.init_ubuntu_env(na_node_list)
+					# retArray = ['OK', "success"]
 
-			###############
-			####Restore####
-			###############
-			retArray = self.init_fuelenv(data)
-
-			#set mode none
+			# set mode none
 			self.svbkc.set_mode_state(CLSTER_NAME, MODE_NONE)
 
 			return retArray
@@ -1128,10 +1279,70 @@ class svrst_manager():
 			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### e_self :' + str(e))
 			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### trace  :%s' % (traceback.format_exc()))
 
-			#set mode none
+			# set mode none
 			self.svbkc.set_mode_state(CLSTER_NAME, MODE_NONE)
 
 			raise
+
+	def init_oo_env(self, data):
+
+		#####################
+		# set predefine
+		#####################
+		node_id = ""
+		br_mode = "r"
+		CLSTER_NAME = self.topology_name
+
+		self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### init_oo_env Start')
+
+		# Reboot Fuel Agent
+		for node_info in data:
+			hostname = node_info['device_name']
+			username = node_info['user_name']
+			password = node_info['password']
+
+			ret = self.wait_os_startup_oo(hostname, username, password)
+			if ret == -1:
+				self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### init_oo_env Error')
+
+		self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, 'node_list : %s' % self.node_list)
+		retArray = self.reset_oo_agent(self.Token, self.node_list)
+
+		self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### init_oo_env End')
+		return retArray
+
+	def init_ubuntu_env(self, data):
+
+		#####################
+		#set predefine
+		#####################
+		node_id = ""
+		br_mode = "r"
+		CLSTER_NAME = self.topology_name
+
+		self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### init_ubuntu_env Start')
+
+		# Reboot Fuel Agent
+		sts = 0
+		for node_info in data:
+			if node_info["server_type"] == NON_ASSIGNMENT:
+				time.sleep(120)
+			hostname = node_info['device_name']
+			username = node_info['user_name']
+			password = node_info['password']
+
+			# server reboot
+			ret = fuel_utls.node_reboot(self.Token, hostname, username, password)
+			if ret != 0:
+				self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### init_ubuntu_env reboot error')
+				sts += 1
+				#return ['NG', 'Error']
+
+		if sts > 0:
+			return ['NG', 'Error']
+
+		self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### init_ubuntu_env End')
+		return ['OK', 'Success']
 
 	def init_fuelenv(self, data):
 
@@ -1157,7 +1368,7 @@ class svrst_manager():
 			return ['NG', "Error"]
 
 		# Custamize FuelServer network setting
-		ret = self.wait_fuelserver_startup(hostname, username, password)
+		ret = self.init_fuelserver_env(hostname, username, password)
 		if ret == -1:
 			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Init FuelServer env Error')
 			return ['NG', 'Error']
@@ -1181,6 +1392,161 @@ class svrst_manager():
 	@retry(pexpect.EOF, tries=100, delay=10)
 	def wait_fuelserver_startup(self, hostname, username, password):
 
+		self.svbkm.b_log(hostname, self.topology_name, '#### wait_fuelserver_startup Start')
+
+		# Get C-Plane/M-Plane address
+		nicinfo = fuel_utls.node_nic_info(self.Token, hostname)
+
+		server_mip = nicinfo.get_ip_address(nicinfo.M_PLANE)
+		if (server_mip == -1):
+			self.svbkm.b_log(hostname, self.topology_name, '#### wait_fuelserver_startup get M_PLANE Error')
+			return -1
+
+		# --- Set Public network env
+		try:
+			s = pxssh.pxssh()
+			s.login(server_mip, username, password, login_timeout=10*60)
+			s.logout()
+
+		except pxssh.ExceptionPxssh, e:
+			print "pxssh failed on login."
+			print str(e)
+
+		self.svbkm.b_log(hostname, self.topology_name, '#### wait_fuelserver_startup End')
+		return 0
+
+	@retry(pexpect.EOF, tries=100, delay=10)
+	def wait_os_startup(self, hostname, username, password):
+
+		self.svbkm.b_log(hostname, self.topology_name, '#### wait_os_startup Start')
+
+		# Get C-Plane/M-Plane address
+		nicinfo = fuel_utls.node_nic_info(self.Token, hostname)
+
+		server_mip = nicinfo.get_ip_address(nicinfo.M_PLANE)
+		if (server_mip == -1):
+			self.svbkm.b_log(hostname, self.topology_name, '#### wait_os_startup get M_PLANE Error')
+			return -1
+
+		# --- Set Public network env
+		try:
+			s = pxssh.pxssh()
+			s.login(server_mip, username, password, login_timeout=10*60)
+			self._pxssh_set_sudopasswd(s, password)
+			self._pxssh_set_zabbixagent(s, hostname, server_mip)
+			# self._pxssh_set_network(s)
+			# self._pxssh_put_oopatch(s)
+			self._pxssh_set_hostname(s, hostname, password)
+			s.logout()
+
+		except pxssh.ExceptionPxssh, e:
+			print "pxssh failed on login."
+			print str(e)
+
+		self.svbkm.b_log(hostname, self.topology_name, '#### wait_os_startup End')
+		return 0
+
+	@retry(pexpect.EOF, tries=100, delay=10)
+	def wait_os_startup_oo(self, hostname, username, password):
+
+		self.svbkm.b_log(hostname, self.topology_name, '#### wait_os_startup_oo Start')
+
+		# Get C-Plane/M-Plane address
+		nicinfo = fuel_utls.node_nic_info(self.Token, hostname)
+
+		server_mip = nicinfo.get_ip_address(nicinfo.M_PLANE)
+		if (server_mip == -1):
+			self.svbkm.b_log(hostname, self.topology_name, '#### wait_os_startup_oo get M_PLANE Error')
+			return -1
+
+		# --- Set Public network env
+		try:
+			s = pxssh.pxssh()
+			s.login(server_mip, username, password, login_timeout=10*60)
+			s.logout()
+
+		except pxssh.ExceptionPxssh, e:
+			print "pxssh failed on login."
+			print str(e)
+
+		self.svbkm.b_log(hostname, self.topology_name, '#### wait_os_startup_oo End')
+		return 0
+
+	def _pxssh_set_sudopasswd(self, instance, password):
+		s = instance
+
+		cmd = 'sudo ls'
+		s.sendline(cmd)
+		s.expect('.*password for .*', timeout=2*600)
+		s.sendline(password)
+		s.prompt()
+
+	def _pxssh_set_hostname(self, instance, hostname, password):
+		s = instance
+
+		hostname_script = 'cat > /tmp/hostname.sh << EOF_MAIN\r' \
+			'sed -i -e s/novacomxx/%(hostname)s/ /etc/hostname\r' \
+			'sed -i -e s/novacomxx/%(hostname)s/ /etc/hosts\r' \
+			'hostname %(hostname)s\r' \
+			'EOF_MAIN\r' % {"hostname": hostname}
+
+		s.sendline(hostname_script)
+		s.sendline('chmod +x /tmp/hostname.sh')
+		s.sendline('sudo /tmp/hostname.sh')
+		s.prompt()
+
+	def _pxssh_set_zabbixagent(self, instance, hostname, server_mip):
+		s = instance
+
+		# Set Zabbix Agent config
+		cmd = 'sudo sed -i -e s/172\.16\.1\.180/' + server_mip + \
+								'/ //etc/zabbix/zabbix_agentd.conf'
+		s.sendline(cmd)
+		s.prompt()
+
+		cmd = 'sudo sed -i -e s/novacomXX/' + hostname + \
+								'/ //etc/zabbix/zabbix_agentd.conf'
+		s.sendline(cmd)
+		s.prompt()
+
+		s.sendline('sudo service zabbix-agent restart')
+		s.prompt()
+
+	def _pxssh_set_network(self, instance):
+		s = instance
+
+		cmd = 'sudo sed -i -e s/"auto eth3"/"#auto eth3"/ //etc/network/interfaces'
+		s.sendline(cmd)
+		s.prompt()
+
+		cmd = 'sudo sed -i -e s/"iface eth3"/"#iface eth3"/ //etc/network/interfaces'
+		s.sendline(cmd)
+		s.prompt()
+
+	def _pxssh_put_oopatch(self, instance):
+		s = instance
+
+		oo_patch = 'cat > /tmp/agent.patch << EOF_MAIN\r' \
+			'--- __init__.py_org	2014-07-23 14:39:04.239097199 +0900\r' \
+			'+++ __init__.py	2014-07-23 14:39:25.194833750 +0900\r' \
+			'@@ -118,7 +118,8 @@\r' \
+			'         except Exception:\r' \
+			'             self._exit(True)\r' \
+			'\r' \
+			'-        socket.setdefaulttimeout(30)\r' \
+			'+        #socket.setdefaulttimeout(30)\r' \
+			'+        socket.setdefaulttimeout(2*60)\r' \
+			'\r' \
+			'     def _exit(self, exception):\r' \
+			'         """Terminate the agent.\r' \
+			'EOF_MAIN\r'
+
+		s.sendline(oo_patch)
+		s.sendline('sudo cp /tmp/agent.patch /home/openstack/')
+
+	@retry(pexpect.EOF, tries=100, delay=10)
+	def init_fuelserver_env(self, hostname, username, password):
+
 		self.svbkm.b_log(hostname, self.topology_name, '#### init_fuelserver_env Start')
 
 		# Get C-Plane/M-Plane address
@@ -1191,76 +1557,25 @@ class svrst_manager():
 			self.svbkm.b_log(hostname, self.topology_name, '#### init_fuelserver_env get M_PLANE Error')
 			return -1
 
-		# vvv--- Delete schedule (move to NCS)
-		server_cip = nicinfo.get_ip_address(nicinfo.C_PLANE)
-		server_cgw = nicinfo.get_gw_address(nicinfo.C_PLANE)
-		if (server_cip == -1) or (server_cgw == -1):
-			self.svbkm.b_log(hostname, self.topology_name, '#### init_fuelserver_env get C_PLANE Error')
-			return -1
-		# ^^^---
-
-		#--- Set Public network env
+		# --- Set Public network env
 		try:
 			s = pxssh.pxssh()
 			s.login(server_mip, username, password, login_timeout=10*60)
+			self._pxssh_set_sudopasswd(s, password)
+			self._pxssh_set_zabbixagent(s, hostname, server_mip)
 
-			# vvv--- Delete schedule(move to NCS)
-			#--- Set Public network ipaddress
-			server_ip = server_cip.replace('.', '\.')
-			cmd = 'sudo sed -i -e s/192\.168\.1\.180/' + server_ip + \
-									'/ /etc/sysconfig/network-scripts/ifcfg-eth2'
-			#print cmd
-
-			s.sendline(cmd)
-			s.expect('.*password for .*')
-			s.sendline(password)
-			s.prompt()
-			#print s.before
-
-			#--- Set Public gateway address
-			gw_ip = server_cgw.replace('.', '\.')
-			cmd = 'sudo sed -i -e s/192\.168\.1\.254/' + gw_ip + \
-									'/ /etc/sysconfig/network-scripts/ifcfg-eth2'
-			#print cmd
-
-			s.sendline(cmd)
-			s.prompt()
-			#print s.before
-
-			# Netwrok restart FuelServer(olny CentOS)
-			"""
-			if (os.path.exists('/etc/lsb-release') == True):
-				# Ubuntu
-				s.sendline ('sudo /etc/init.d/network restart')
-			else:
-				# CentOS
-				s.sendline ('sudo service network restart')
-			"""
-			s.sendline('sudo service network restart')
-			s.prompt()
-			logs = s.before
-			print s.before
-			# ^^^---
-
-			# DHCP Start check
-			s.sendline('sudo tail -n 100 -f /var/log/docker-logs/dnsmasq.log')
+			# DHCP Start up waitting
+			time.sleep(120)
+			#s.sendline('sudo tail -n 100 -f /var/log/docker-logs/dnsmasq.log')
 			#s.expect('.*password for .*')
 			#s.sendline(password)
-			s.expect("started", timeout=20*60)
-			s.sendcontrol('c')
+			#s.expect("started", timeout=20*60)
+			#s.sendcontrol('c')
 			s.logout()
 
 		except pxssh.ExceptionPxssh, e:
 			print "pxssh failed on login."
 			print str(e)
-
-		# vvv--- Delete schedule(move to NCS)
-		#--- check error
-		#print logs
-		if "NG" in logs:
-			self.svbkm.b_log(hostname, self.topology_name, '#### init_fuelserver_env network restart error')
-			return -1
-		# ^^^---
 
 		self.svbkm.b_log(hostname, self.topology_name, '#### init_fuelserver_env End')
 		return 0
@@ -1281,7 +1596,7 @@ class svrst_manager():
 			##################
 			self.svbkm.make_log_file_name(CLSTER_NAME, node_id, br_mode, restore_name="reset")
 
-			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Mode check Start')
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Mode check Start(teardown_server)')
 
 			"""
 			ret = self._reset_precheck(br_mode, CLSTER_NAME)
@@ -1290,7 +1605,7 @@ class svrst_manager():
 				return ['NG', '#### reset already running']
 			elif -1 == ret:
 				return ['NG', '#### While backup is running, can not reset']
-			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Mode check OK ')
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Mode check OK(teardown_server)')
 			"""
 
 			####################
@@ -1356,7 +1671,7 @@ class svrst_manager():
 			password = node_info['password']
 
 			# Disable FuelServer NIC1(DHCP working)
-			ret = self.disable_fuelserver_hdcp(hostname, username, password)
+			ret = self.disable_fuelserver_dhcp(hostname, username, password)
 			if ret == -1:
 				self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Disable FuelServer NIC1 Error')
 				return ['NG', 'Error']
@@ -1364,7 +1679,7 @@ class svrst_manager():
 		self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### teardown_fuelserver End')
 		return ['OK', 'Success']
 
-	def disable_fuelserver_hdcp(self, hostname, username, password):
+	def disable_fuelserver_dhcp(self, hostname, username, password):
 
 		self.svbkm.b_log(hostname, self.topology_name, '#### disable_fuelserver_hdcp Start')
 
@@ -1410,3 +1725,334 @@ class svrst_manager():
 
 		self.svbkm.b_log(hostname, self.topology_name, '#### disable_fuelserver_hdcp End')
 		return 0
+
+	################################
+	# reset OpenOrion Agent
+	################################
+	def reset_oo_agent(self, token, node_list, **kwargs):
+
+		br_mode = 'r'
+		node_id = ''
+		CLSTER_NAME = 'reset_oo-agent'
+		#set token
+		ret = self.svbkm.set_token_value(CLSTER_NAME, node_id, br_mode, token)
+
+		if ret != 0:
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '###set token err')
+			return ['NG', '###set token err']
+
+		self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Reset OpenOrion Agent Start ')
+
+		# set parameter
+		ret = self.svbkm.set_system_param(CLSTER_NAME, node_id, br_mode)
+		if ret != 0:
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### set_system_param err')
+			return ['NG', '#### set_system_param err']
+
+		ret = self.set_system_param(CLSTER_NAME, node_id, br_mode)
+		if ret != 0:
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### set_system_param err1')
+			return ['NG', '#### set_system_param err1']
+
+		# set prefix log title
+		self.svbkm.set_log_Title('TS_%s_%s_' % (self.tenant_name, CLSTER_NAME))
+
+		# make file LogName
+		self.svbkm.make_log_file_name(CLSTER_NAME, node_id, br_mode, restore_name="reset")
+
+		self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Mode check Start(reset_oo_agent)')
+
+		ret = self._reset_precheck(br_mode, CLSTER_NAME)
+
+		if 1 == ret:
+			return ['NG', '#### reset already running']
+		elif -1 == ret:
+			return ['NG', '#### While backup is running, can not reset']
+		self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Mode check OK(reset_oo_agent) ')
+
+		ret = self.reset_oo_agent_sub(
+			token, node_list, br_mode=br_mode, node_id=node_id, clster_name=CLSTER_NAME)
+
+		# set mode none
+		self.svbkc.set_mode_state(CLSTER_NAME, MODE_NONE)
+
+		return ret
+
+	def reset_oo_agent_sub(self, token, node_list, **kwargs):
+
+		server_info_num = 4
+		br_mode = kwargs['br_mode']
+		node_id = kwargs['node_id']
+		CLSTER_NAME = kwargs['clster_name']
+
+		self.ori.set_auth(token)
+		#####################################
+		# get Info of Open Orion
+		#####################################
+		data = self.ori.get_device(self.opencenter_server_name)
+
+		self.svbkm.br_log(
+			node_id, CLSTER_NAME, br_mode, '#### s_name=%s' % (self.opencenter_server_name))
+
+		if -1 == data[0]:
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Set openorion get_device err')
+			return ['NG', 'Set openorion get_device err']
+
+		dev_data = {}
+		dev_data = data[1]
+		oo_user = dev_data['user_name']
+		oo_upw = dev_data['password']
+
+		# get IP address(M-Plane)
+		data = self.ori.get_nic_traffic_info(self.opencenter_server_name, 'M-Plane')
+
+		if -1 != data[0]:
+			data1 = {}
+			data1 = data[1][0]
+			oom_ip = data1['ip_address']
+		else:
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, "get ip_address error:%s" % (data[1]))
+			return ['NG', 'get ip_address error']
+
+		# get IP address(C-Plane)
+		data = self.ori.get_nic_traffic_info(self.opencenter_server_name, 'C-Plane')
+
+		if -1 != data[0]:
+			data1 = {}
+			data1 = data[1][0]
+			oo_ip = data1['ip_address']
+		else:
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, "get ip_address error:%s" % (data[1]))
+			return ['NG', 'get ip_address error']
+
+		#####################################
+		# Set chef Make Exec Env
+		#####################################
+		self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Set chef Make Exec Env')
+
+		data = self.ori.get_device(OCCHEF)
+		if -1 == data[0]:
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Set chef get_device err')
+			return ['NG', 'Set chef get_device err']
+
+		dev_data = {}
+		dev_data = data[1]
+		chef_user = dev_data['user_name']
+		chef_pw = dev_data['password']
+
+		data = self.ori.get_nic_traffic_info(OCCHEF, 'M-Plane')
+		if -1 == data[0]:
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Set chef get_nic_traffic err')
+			return ['NG', 'Set chef get_nic_traffic err']
+
+		nic_data = {}
+		nic_data = data[1][0]
+		chef_ip = nic_data['ip_address']
+
+		self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, 'Set chef Make Exec')
+		ret = self.svbkm.make_exec(
+			chef_user, chef_ip, chef_user, chef_pw, FILEDIR, br_mode, node_id, CLSTER_NAME)
+		if ret != 0:
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Set chef Make Exec err')
+			return ['NG', 'Set chef make_exec err']
+
+		ret = self.set_node_list(node_list)
+		if ret != 0:
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Set node_list err')
+			return ['NG', 'Set node_list err']
+
+		server_node_name = self.server_list
+		server_num = len(server_node_name)
+		server_info = [["null" for j in range(server_info_num)] for i in range(server_num)]
+
+		# Set Server info
+		self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Set Server info')
+
+		for i in range(0, server_num):
+			self.svbkm.br_log(
+				node_id, CLSTER_NAME, br_mode, 'Set Server info server_node_name[%s]=%s' % (i, server_node_name[i]))
+
+			retdata = self.svbkm.set_server_info(
+				node_id, server_info[i], server_node_name[i], CLSTER_NAME, br_mode)
+			if 0 != retdata[0]:
+				self.svbkm.br_log(
+					node_id, CLSTER_NAME, br_mode, '#### Set Server info  server_node_name=%s' % (server_node_name[i]))
+
+				msg = 'Set Server info set server_node_name=%s' % (server_node_name[i])
+				return ['NG', msg]
+
+		if (0 != server_num):
+			############################
+			# Delete node from OpenOrion
+			############################
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Delete node')
+
+			end_point = 'https://admin:password@%s:8443/' % (oo_ip)
+
+			for i in range(0, server_num):
+				# cmd = 'opencentercli node delete %s --endpoint %s 2> /dev/null' % (server_info[i][NAME_INDEX], end_point)
+				cmd = 'ssh root@%s opencentercli node delete %s --endpoint %s 2> /dev/null' % \
+					(chef_ip, server_info[i][NAME_INDEX], end_point)
+				ret = self.svbkm.shellcmd_exec(chef_user, br_mode, node_id, CLSTER_NAME, cmd)
+				if ret != 0:
+					self.svbkm.br_log(
+						node_id, CLSTER_NAME, br_mode,
+						'#### Delete node from opencenter err (%s)' % (server_info[i][NAME_INDEX]))
+
+				cmd = 'ssh root@%s %s client delete -y %s 2> /dev/null' % (chef_ip, KNIFE, server_info[i][NAME_INDEX])
+
+				ret = self.svbkm.shellcmd_exec(chef_user, br_mode, node_id, CLSTER_NAME, cmd)
+				if ret != 0:
+					self.svbkm.br_log(
+						node_id, CLSTER_NAME, br_mode, '#### Delete client from chef err (%s)' % (server_info[i][NAME_INDEX]))
+
+			# Set Exec_User
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Set Exec_User')
+			ret = self.svbkm.get_user_name(self.opencenter_server_name)
+			if 0 == ret[0]:
+				EXEC_USER = ret[1]
+			else:
+				self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Set Exec_User error')
+				msg = 'Set Exec_User error'
+				return ['NG', msg]
+
+			###############################
+			# setup opencenter-agent to node
+			###############################
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### setup opencenter-agent')
+
+			for i in range(0, server_num):
+				while 1:
+					ret = self.svbkm.make_exec(
+						EXEC_USER, server_info[i][IP_INDEX], server_info[i][USER_INDEX],
+						server_info[i][PW_INDEX], FILEDIR, br_mode, node_id, CLSTER_NAME)
+					if ret != 0:
+						self.svbkm.br_log(
+							node_id, CLSTER_NAME, br_mode, '#### rsa key copy all=%d index=%d' % (server_num, i))
+
+					cmd = 'ls'
+					cmd = 'ssh root@%s "%s"' % (server_info[i][IP_INDEX], cmd)
+					ret = self.svbkm.shellcmd_exec(EXEC_USER, br_mode, node_id, CLSTER_NAME, cmd)
+					if ret != 0:
+						self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### chk boot WAIT(%s)' %(server_info[i][NAME_INDEX]))
+					else:
+						self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### chk boot OK(%s)' %(server_info[i][NAME_INDEX]))
+						break
+
+				cmd = '/bin/rm -r /etc/opencenter'
+				cmd = 'ssh root@%s "%s"' % (server_info[i][IP_INDEX], cmd)
+
+				ret = self.svbkm.shellcmd_exec(EXEC_USER, br_mode, node_id, CLSTER_NAME, cmd)
+				if ret != 0:
+					self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### setup opencenter-agent del err (%s)' %(server_info[i][NAME_INDEX]))
+	
+				cmd = 'curl -s -L http://sh.opencenter.rackspace.com/install.sh | bash -s - --role=agent --ip=%s' % (oo_ip)
+				cmd = 'ssh root@%s "%s"' % (server_info[i][IP_INDEX], cmd)
+
+				for loop_cnt in range(0, RETRY_CNT):
+					ret = self.svbkm.shellcmd_exec(EXEC_USER, br_mode, node_id, CLSTER_NAME, cmd)
+					if ret != 0:
+						self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### setup opencenter-agent err (%s)' %(server_info[i][NAME_INDEX]))
+
+					else:
+						cmd = 'patch /usr/share/pyshared/opencenteragent/__init__.py < /home/openstack/agent.patch'
+						cmd = 'ssh root@%s "%s"' % (server_info[i][IP_INDEX], cmd)
+
+						ret = self.svbkm.shellcmd_exec(EXEC_USER, br_mode, node_id, CLSTER_NAME, cmd)
+						if ret != 0:
+							self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### setup opencenter-agent patch err (%s)' %(oo_ip))
+						break
+
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### OpenOrion agent restart')
+			self._restart_opencenter_agent(oom_ip, oo_user, oo_upw)
+
+		switch_node_name = self.switch_list
+		switch_num = len(switch_node_name)
+		if ( 0 != switch_num):
+			put_url = BASE_SRV_URL % (OPENORION_HOST, HTTP_PORT)
+			switches = []
+			for switch_name in self.switch_list:
+				tmp_data = switch_name.encode('utf-8')
+				switches.append(tmp_data)
+			para_data = { "switches" : switches }
+
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### put_url = %s, para_data = %s' % (put_url, para_data))
+			code, msg = fuel_utls.http_request(put_url, para_data, 'POST')
+			if code != 200:
+				self.svbkm.bir_log(node_id, CLSTER_NAME, '#### POST Switch to OpenOrion ERR')
+
+			#cmd =  CURL_CMD % (PUT_CMD, PUT_HEADER, put_url, para_data)
+
+			#ret, stdout_data, stderr_data = self.cmd_run(cmd)
+			pass
+
+
+		self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Complete Success')
+		self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Reset OpenOrion Agent End ')
+		return ['OK', 'success']
+
+	def reset_switch(self, token, node_list, **kwargs):
+
+		br_mode = 'r'
+		node_id = ''
+		CLSTER_NAME = 'reset_switch'
+
+		#set token
+		ret = self.svbkm.set_token_value(CLSTER_NAME, node_id, br_mode, token)
+
+		if ret != 0:
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '###set token err')
+			return ['NG', '###set token err']
+		#get restore folder name
+		BACKUP_FOLDER_RNAME="%s/%s/%s" % (BASE_DIR_NAME, RESET_ENV, MASTER_ENV)
+		self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, 'reset_name: %s' % BACKUP_FOLDER_RNAME)
+
+		#set define
+		SAVE_DIR_NAME_SWITCH="%s/switch" % (BACKUP_FOLDER_RNAME)
+
+		ret = self.set_node_list(node_list)
+		if ret != 0:
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Set node_list err')
+
+		if (0 == len(self.switch_list)):
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### switch num is 0 then "no action"')
+			return ['OK', 'success']
+
+		#switch restore
+		self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Run Switch reset Start')
+
+		ret = self.set_system_param(CLSTER_NAME, node_id, br_mode)
+		if ret != 0:
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### set_system_param err')
+			return ['NG', '#### set_system_param err']
+
+		#Set Exec_User
+		self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Set Exec_User')
+		ret = self.svbkm.get_user_name(self.opencenter_server_name)
+		if 0 == ret[0]:
+			exec_user=ret[1]
+		else:
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### Set Exec_User error')
+			msg='Set Exec_User error'
+			return ['NG', msg]
+
+		psbk = psbk_manager.psbk_manager(exec_user, self.storage_server_name, SAVE_DIR_NAME_SWITCH, self.logObj)
+
+		switch_node_names=','.join(self.switch_list)
+		self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### SWITCH Call psbk.set_PS_list')
+		self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '####SWITCH_NODE_LIST :List(char) %s ' %(switch_node_names))
+
+		ret = psbk.set_PS_list(switch_node_names)
+		if 0 != ret:
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '#### SWITCH psbk.set_PS_list Err')
+			return ['NG', '#### SWITCH psbk.set_PS_list Err psbk.set_PS_list Err)']
+
+		psbk.set_auth(token)
+		self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '####SWITCH  Call psbk.exec_restore()')
+		ret = psbk.exec_restore()
+		if 0 != ret:
+			self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '####SWITCH  psbk.exec_restore() Err')
+			return ['NG', '####SWITCH  psbk.exec_restore() ']
+
+		self.svbkm.br_log(node_id, CLSTER_NAME, br_mode, '####SWITCH  Run Switch restore End')
+		return ['OK', 'success']
